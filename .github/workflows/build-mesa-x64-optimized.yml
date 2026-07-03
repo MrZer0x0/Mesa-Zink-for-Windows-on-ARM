@@ -46,42 +46,54 @@ jobs:
         echo "C:\winflexbison" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
       shell: pwsh
 
-    - name: Setup Vulkan-Headers and Loader
+    - name: Setup Vulkan SDK (Headers + Loader stub)
       run: |
-        # Clone Vulkan-Headers (for compilation headers)
-        git clone --depth 1 --branch v1.4.313.0 https://github.com/KhronosGroup/Vulkan-Headers.git C:\Vulkan-Headers
+        # ============================================
+        # Vulkan SDK setup without LunarG installer
+        # Uses GitHub releases (always available)
+        # ============================================
 
-        # Create VULKAN_SDK directory structure
-        New-Item -ItemType Directory -Force -Path "C:\VulkanSDK\Include" | Out-Null
-        New-Item -ItemType Directory -Force -Path "C:\VulkanSDK\Lib" | Out-Null
-        New-Item -ItemType Directory -Force -Path "C:\VulkanSDK\Bin" | Out-Null
+        $vulkanVersion = "v1.4.339"
+        $vulkanSdkDir = "C:\VulkanSDK"
+
+        # 1. Download Vulkan-Headers from GitHub
+        Write-Host "=== Downloading Vulkan-Headers ($vulkanVersion) ==="
+        Invoke-WebRequest -Uri "https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/$vulkanVersion.zip" -OutFile "Vulkan-Headers.zip"
+        Expand-Archive -Path "Vulkan-Headers.zip" -DestinationPath "C:\temp-vk"
+        $headersDir = Get-ChildItem "C:\temp-vk" -Directory | Select-Object -First 1
+
+        # 2. Create VULKAN_SDK directory structure
+        New-Item -ItemType Directory -Force -Path "$vulkanSdkDir\Include" | Out-Null
+        New-Item -ItemType Directory -Force -Path "$vulkanSdkDir\Lib" | Out-Null
+        New-Item -ItemType Directory -Force -Path "$vulkanSdkDir\Bin" | Out-Null
 
         # Copy headers
-        Copy-Item -Path "C:\Vulkan-Headers\include\*" -Destination "C:\VulkanSDK\Include\" -Recurse -Force
+        Copy-Item -Path "$($headersDir.FullName)\include\*" -Destination "$vulkanSdkDir\Include\" -Recurse -Force
 
-        # Clone and build Vulkan-Loader (stub library for linking)
-        git clone --depth 1 --branch v1.4.313.0 https://github.com/KhronosGroup/Vulkan-Loader.git C:\Vulkan-Loader
+        # 3. Create vulkan-1.def stub library for linking
+        # Zink loads vulkan-1.dll dynamically, but Meson needs a lib to link against
+        Write-Host "=== Creating vulkan-1 stub library ==="
+        @"
+LIBRARY vulkan-1
+EXPORTS
+    vkGetInstanceProcAddr
+    vkCreateInstance
+    vkEnumerateInstanceExtensionProperties
+    vkEnumerateInstanceLayerProperties
+    vkEnumerateInstanceVersion
+"@ | Out-File -FilePath "$vulkanSdkDir\vulkan-1.def" -Encoding ascii
 
-        # Build Vulkan-Loader with CMake
-        $cmakePath = "C:\Program Files\CMake\bin\cmake.exe"
-        & $cmakePath -S C:\Vulkan-Loader -B C:\Vulkan-Loader\build `
-          -G "Ninja" `
-          -DCMAKE_BUILD_TYPE=Release `
-          -DCMAKE_INSTALL_PREFIX="C:\VulkanSDK" `
-          -DVULKAN_HEADERS_INSTALL_DIR="C:\VulkanSDK" `
-          -DUSE_MASM=OFF `
-          -DBUILD_TESTS=OFF
+        # Generate .lib from .def using MSVC's lib.exe
+        lib.exe /def:"$vulkanSdkDir\vulkan-1.def" /out:"$vulkanSdkDir\Lib\vulkan-1.lib" /machine:x64
 
-        & $cmakePath --build C:\Vulkan-Loader\build
-        & $cmakePath --install C:\Vulkan-Loader\build
+        # 4. Verify
+        Write-Host "=== Vulkan SDK Structure ==="
+        Get-ChildItem "$vulkanSdkDir" -Recurse -File | Where-Object { $_.Name -match "vulkan" } | Select-Object FullName
+        Write-Host "Headers OK: $(Test-Path "$vulkanSdkDir\Include\vulkan\vulkan.h")"
+        Write-Host "Lib OK: $(Test-Path "$vulkanSdkDir\Lib\vulkan-1.lib")"
 
-        # Set environment variables
-        echo "VULKAN_SDK=C:\VulkanSDK" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-        echo "C:\VulkanSDK\Bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-
-        # Verify
-        Write-Host "=== Vulkan SDK Setup ==="
-        Get-ChildItem C:\VulkanSDK -Recurse | Where-Object { $_.Name -like "vulkan*" } | Select-Object FullName
+        # 5. Set environment variables
+        echo "VULKAN_SDK=$vulkanSdkDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       shell: pwsh
 
     - name: Configure Mesa with Meson
