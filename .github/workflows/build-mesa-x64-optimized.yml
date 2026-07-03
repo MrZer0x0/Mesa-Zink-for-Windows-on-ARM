@@ -1,4 +1,4 @@
-name: Build Mesa Zink x64
+name: Build Mesa GLonD3D12 x64
 
 on:
   push:
@@ -26,7 +26,7 @@ jobs:
       - name: Install build tools
         run: |
           python -m pip install --upgrade pip
-          pip install meson ninja mako PyYAML
+          pip install meson ninja mako PyYAML pywin32
 
       - name: Setup MSVC
         uses: ilammy/msvc-dev-cmd@v1
@@ -40,16 +40,13 @@ jobs:
           echo "C:\winflexbison" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
         shell: pwsh
 
-      - name: Setup Vulkan Headers
+      - name: Setup DirectX Headers
         run: |
-          git clone --depth 1 https://github.com/KhronosGroup/Vulkan-Headers.git C:\Vulkan-Headers
-          New-Item -ItemType Directory -Force -Path "C:\VulkanSDK\Include"
-          New-Item -ItemType Directory -Force -Path "C:\VulkanSDK\Lib"
-          Copy-Item -Path "C:\Vulkan-Headers\include\*" -Destination "C:\VulkanSDK\Include\" -Recurse -Force
-          $defContent = "LIBRARY vulkan-1`nEXPORTS`n    vkGetInstanceProcAddr`n    vkCreateInstance`n    vkEnumerateInstanceExtensionProperties`n    vkEnumerateInstanceLayerProperties`n    vkEnumerateInstanceVersion`n"
-          [System.IO.File]::WriteAllText("C:\VulkanSDK\vulkan-1.def", $defContent)
-          lib.exe /def:"C:\VulkanSDK\vulkan-1.def" /out:"C:\VulkanSDK\Lib\vulkan-1.lib" /machine:x64
-          echo "VULKAN_SDK=C:\VulkanSDK" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          git clone --depth 1 https://github.com/microsoft/DirectX-Headers.git C:\DirectX-Headers
+          New-Item -ItemType Directory -Force -Path "C:\DirectX-Headers\build"
+          cmake -S C:\DirectX-Headers -B C:\DirectX-Headers\build -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="C:\DirectX-Headers\install" -DDXHEADERS_BUILD_TEST=OFF -DDXHEADERS_BUILD_GOOGLE_TEST=OFF
+          cmake --build C:\DirectX-Headers\build
+          cmake --install C:\DirectX-Headers\build
         shell: pwsh
 
       - name: Clean PATH (remove Strawberry Perl)
@@ -60,10 +57,10 @@ jobs:
           echo "CXX=cl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
         shell: pwsh
 
-      - name: Configure Mesa (Zink only)
+      - name: Configure Mesa (GLonD3D12)
         run: |
           cd mesa-src
-          meson setup builddir --prefix="${{ github.workspace }}/install" -Dbuildtype=release -Dplatforms=windows "-Dgallium-drivers=zink" "-Dvulkan-drivers=" -Dgles1=enabled -Dgles2=enabled -Dllvm=disabled -Dvalgrind=disabled -Dbuild-tests=false -Dwerror=false "-Dc_args=/wd4189" "-Dcpp_args=/wd4189"
+          meson setup builddir --prefix="${{ github.workspace }}/install" -Dbuildtype=release -Dplatforms=windows "-Dgallium-drivers=d3d12" "-Dvulkan-drivers=" -Dgles1=enabled -Dgles2=enabled -Dllvm=disabled -Dvalgrind=disabled -Dbuild-tests=false -Dwerror=false "-Dc_args=/wd4189" "-Dcpp_args=/wd4189"
         shell: pwsh
 
       - name: Build Mesa
@@ -81,12 +78,14 @@ jobs:
       - name: Package and upload
         run: |
           cd install
-          Compress-Archive -Path * -DestinationPath ../mesa-zink-windows-x64.zip
+          Write-Host "=== Installed files ==="
+          Get-ChildItem -Recurse -File | Select-Object FullName
+          Compress-Archive -Path * -DestinationPath ../mesa-gond3d12-windows-x64.zip
         shell: pwsh
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: mesa-zink-windows-x64
-          path: mesa-zink-windows-x64.zip
+          name: mesa-gond3d12-windows-x64
+          path: mesa-gond3d12-windows-x64.zip
           retention-days: 90
