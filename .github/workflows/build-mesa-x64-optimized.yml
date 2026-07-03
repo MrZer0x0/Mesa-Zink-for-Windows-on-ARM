@@ -1,4 +1,4 @@
-name: Build Mesa Zink for Windows x64
+name: Build Mesa Zink for Windows x64 (Optimized)
 
 on:
   push:
@@ -6,103 +6,103 @@ on:
   pull_request:
     branches: [ main, master ]
   workflow_dispatch:
+    inputs:
+      mesa_version:
+        description: 'Mesa version (git tag or branch)'
+        required: false
+        default: 'main'
+      build_type:
+        description: 'Build type'
+        required: true
+        default: 'release'
+        type: choice
+        options:
+        - release
+        - debug
+        - debugoptimized
 
 jobs:
   build-windows-x64:
     runs-on: windows-latest
-
+    
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
       with:
         fetch-depth: 1
-
+    
     - name: Checkout Mesa source
       run: |
-        git clone --depth 1 https://gitlab.freedesktop.org/mesa/mesa.git mesa-src
+        $mesaVersion = "${{ github.event.inputs.mesa_version }}"
+        if ($mesaVersion -eq "main") {
+          git clone --depth 1 https://gitlab.freedesktop.org/mesa/mesa.git mesa-src
+        } else {
+          git clone --depth 1 --branch $mesaVersion https://gitlab.freedesktop.org/mesa/mesa.git mesa-src
+        }
       shell: pwsh
-
+    
     - name: Setup Python
       uses: actions/setup-python@v5
       with:
         python-version: '3.11'
         architecture: 'x64'
-
+    
     - name: Install Meson and Ninja
       run: |
         python -m pip install --upgrade pip
         pip install meson ninja mako PyYAML pywin32
-      shell: pwsh
-
+    
     - name: Setup MSVC for x64
       uses: ilammy/msvc-dev-cmd@v1
       with:
         arch: amd64
-
+    
+    - name: Cache LLVM
+      id: cache-llvm
+      uses: actions/cache@v4
+      with:
+        path: C:\llvm
+        key: llvm-17.0.6-windows-x64
+    
+    - name: Install LLVM
+      if: steps.cache-llvm.outputs.cache-hit != 'true'
+      run: |
+        Invoke-WebRequest -Uri "https://github.com/llvm/llvm-project/releases/download/llvmorg-17.0.6/LLVM-17.0.6-win64.exe" -OutFile "LLVM.exe"
+        Start-Process -FilePath "LLVM.exe" -ArgumentList "/S /D=C:\llvm" -Wait
+        echo "C:\llvm\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      shell: pwsh
+    
+    - name: Setup LLVM paths
+      run: |
+        echo "C:\llvm\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+        echo "LLVM_CONFIG=C:\llvm\bin\llvm-config.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      shell: pwsh
+    
+    - name: Install Vulkan SDK
+      run: |
+        Invoke-WebRequest -Uri "https://sdk.lunarg.com/sdk/download/1.3.275.0/windows/VulkanSDK-1.3.275.0-Installer.exe" -OutFile "VulkanSDK.exe"
+        Start-Process -FilePath "VulkanSDK.exe" -ArgumentList "--accept-licenses --default-answer --confirm-command install" -Wait
+        echo "C:\VulkanSDK\1.3.275.0\Bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+        echo "VULKAN_SDK=C:\VulkanSDK\1.3.275.0" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      shell: pwsh
+    
     - name: Install winflexbison
       run: |
         Invoke-WebRequest -Uri "https://github.com/lexxmark/winflexbison/releases/download/v2.5.25/win_flex_bison-2.5.25.zip" -OutFile "winflexbison.zip"
         Expand-Archive -Path "winflexbison.zip" -DestinationPath "C:\winflexbison"
         echo "C:\winflexbison" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
       shell: pwsh
-
-    - name: Setup Vulkan SDK (Headers + Loader stub)
-      run: |
-        # ============================================
-        # Vulkan SDK setup without LunarG installer
-        # Uses GitHub releases (always available)
-        # ============================================
-
-        $vulkanVersion = "v1.4.339"
-        $vulkanSdkDir = "C:\VulkanSDK"
-
-        # 1. Download Vulkan-Headers from GitHub
-        Write-Host "=== Downloading Vulkan-Headers ($vulkanVersion) ==="
-        Invoke-WebRequest -Uri "https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/$vulkanVersion.zip" -OutFile "Vulkan-Headers.zip"
-        Expand-Archive -Path "Vulkan-Headers.zip" -DestinationPath "C:\temp-vk"
-        $headersDir = Get-ChildItem "C:\temp-vk" -Directory | Select-Object -First 1
-
-        # 2. Create VULKAN_SDK directory structure
-        New-Item -ItemType Directory -Force -Path "$vulkanSdkDir\Include" | Out-Null
-        New-Item -ItemType Directory -Force -Path "$vulkanSdkDir\Lib" | Out-Null
-        New-Item -ItemType Directory -Force -Path "$vulkanSdkDir\Bin" | Out-Null
-
-        # Copy headers
-        Copy-Item -Path "$($headersDir.FullName)\include\*" -Destination "$vulkanSdkDir\Include\" -Recurse -Force
-
-        # 3. Create vulkan-1.def stub library for linking
-        # Zink loads vulkan-1.dll dynamically, but Meson needs a lib to link against
-        Write-Host "=== Creating vulkan-1 stub library ==="
-        @"
-LIBRARY vulkan-1
-EXPORTS
-    vkGetInstanceProcAddr
-    vkCreateInstance
-    vkEnumerateInstanceExtensionProperties
-    vkEnumerateInstanceLayerProperties
-    vkEnumerateInstanceVersion
-"@ | Out-File -FilePath "$vulkanSdkDir\vulkan-1.def" -Encoding ascii
-
-        # Generate .lib from .def using MSVC's lib.exe
-        lib.exe /def:"$vulkanSdkDir\vulkan-1.def" /out:"$vulkanSdkDir\Lib\vulkan-1.lib" /machine:x64
-
-        # 4. Verify
-        Write-Host "=== Vulkan SDK Structure ==="
-        Get-ChildItem "$vulkanSdkDir" -Recurse -File | Where-Object { $_.Name -match "vulkan" } | Select-Object FullName
-        Write-Host "Headers OK: $(Test-Path "$vulkanSdkDir\Include\vulkan\vulkan.h")"
-        Write-Host "Lib OK: $(Test-Path "$vulkanSdkDir\Lib\vulkan-1.lib")"
-
-        # 5. Set environment variables
-        echo "VULKAN_SDK=$vulkanSdkDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-      shell: pwsh
-
+    
     - name: Configure Mesa with Meson
       run: |
         cd mesa-src
-
+        
+        $buildType = "${{ github.event.inputs.build_type }}"
+        if (-not $buildType) { $buildType = "release" }
+        
         meson setup builddir `
           --prefix=${{ github.workspace }}/install `
-          -Dbuildtype=release `
+          -Dbuildtype=$buildType `
           -Dplatforms=windows `
           "-Dgallium-drivers=zink,softpipe,llvmpipe" `
           "-Dvulkan-drivers=" `
@@ -112,47 +112,114 @@ EXPORTS
           -Dgbm=disabled `
           -Degl=disabled `
           -Dglx=disabled `
-          -Dllvm=disabled `
-          -Dshared-llvm=disabled `
+          -Dllvm=enabled `
+          -Dshared-llvm=enabled `
           -Dvalgrind=disabled `
           -Dbuild-tests=false `
-          -Db_ndebug=if-release
+          -Db_ndebug=if-release `
+          -Doptimization=3
       shell: pwsh
-
+    
     - name: Build Mesa
       run: |
         cd mesa-src
         meson compile -C builddir
       shell: pwsh
-
+    
     - name: Install Mesa
       run: |
         cd mesa-src
         meson install -C builddir
       shell: pwsh
-
+    
+    - name: Create usage instructions
+      run: |
+        @"
+        ========================================
+        Mesa Zink for Windows x64
+        ========================================
+        
+        USAGE:
+        1. Copy opengl32.dll to your application folder
+        2. Set environment variable:
+           set GALLIUM_DRIVER=zink
+        3. Run your OpenGL application
+        
+        AVAILABLE DRIVERS:
+        - zink: OpenGL 4.6 over Vulkan (recommended)
+        - llvmpipe: Software rendering with LLVM
+        - softpipe: Basic software rendering
+        
+        ENVIRONMENT VARIABLES:
+        set GALLIUM_DRIVER=zink           # Use Zink (default)
+        set GALLIUM_DRIVER=llvmpipe       # Use LLVMpipe
+        set LIBGL_ALWAYS_SOFTWARE=1       # Force software rendering
+        set MESA_DEBUG=1                  # Enable debug output
+        
+        REQUIREMENTS:
+        - Windows 10/11 x64
+        - Vulkan-compatible GPU
+        - Updated GPU drivers with Vulkan support
+        
+        For more info: https://docs.mesa3d.org/drivers/zink.html
+        "@ | Out-File -FilePath "${{ github.workspace }}/install/README.txt" -Encoding utf8
+      shell: pwsh
+    
     - name: Package binaries
       run: |
+        $mesaVersion = "${{ github.event.inputs.mesa_version }}"
+        if (-not $mesaVersion -or $mesaVersion -eq "main") {
+          $mesaVersion = "latest"
+        }
+        
         $timestamp = Get-Date -Format "yyyy-MM-dd"
-        $archiveName = "mesa-zink-windows-x64-$timestamp.zip"
-
+        $archiveName = "mesa-zink-windows-x64-$mesaVersion-$timestamp.zip"
+        
         cd install
         Compress-Archive -Path * -DestinationPath ../$archiveName
-
+        
         echo "ARCHIVE_NAME=$archiveName" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       shell: pwsh
-
+    
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: mesa-zink-windows-x64
+        name: ${{ env.ARCHIVE_NAME }}
         path: ${{ env.ARCHIVE_NAME }}
         retention-days: 90
-
-    - name: Upload binaries as release asset (on tags)
+    
+    - name: Create Release
       if: startsWith(github.ref, 'refs/tags/')
-      uses: softprops/action-gh-release@v2
+      uses: softprops/action-gh-release@v1
       with:
         files: ${{ env.ARCHIVE_NAME }}
+        name: Mesa Zink Windows x64 - ${{ github.ref_name }}
+        body: |
+          ## Mesa Zink for Windows x64
+          
+          Автоматическая сборка Mesa с драйвером Zink для Windows x64.
+          
+          ### Что включено:
+          - **Zink**: OpenGL 4.6 поверх Vulkan
+          - **LLVMpipe**: Программный рендеринг с LLVM
+          - **Softpipe**: Базовый программный рендеринг
+          - OpenGL ES 1.1 и 2.0
+          
+          ### Использование:
+          1. Скачайте и распакуйте архив
+          2. Скопируйте `opengl32.dll` в папку с приложением
+          3. Установите: `set GALLIUM_DRIVER=zink`
+          4. Запустите приложение
+          
+          ### Требования:
+          - Windows 10/11 x64
+          - Vulkan-совместимый GPU
+          - Обновленные драйверы GPU
+          
+          ### Производительность:
+          Zink часто быстрее нативных OpenGL драйверов, особенно на AMD GPU.
+        draft: false
+        prerelease: false
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
