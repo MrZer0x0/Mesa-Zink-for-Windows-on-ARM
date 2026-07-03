@@ -58,7 +58,7 @@ jobs:
       - name: Configure Mesa
         run: |
           cd mesa-src
-          meson setup builddir --prefix="${{ github.workspace }}/install" -Dbuildtype=release -Dplatforms=windows "-Dgallium-drivers=zink,softpipe,llvmpipe" "-Dvulkan-drivers=" -Dgles1=enabled -Dgles2=enabled -Dllvm=disabled -Dvalgrind=disabled -Dbuild-tests=false
+          meson setup builddir --prefix="${{ github.workspace }}/install" -Dbuildtype=release -Dplatforms=windows "-Dgallium-drivers=zink,softpipe" "-Dvulkan-drivers=" -Dgles1=enabled -Dgles2=enabled -Dllvm=disabled -Dvalgrind=disabled -Dbuild-tests=false
         shell: pwsh
 
       - name: Build Mesa
