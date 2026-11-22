@@ -1,0 +1,122 @@
+name: Build Mesa Zink x64 (opengl32.dll)
+
+# OpenGL over Vulkan for Windows x64. Only the Zink driver is compiled, so the
+# resulting opengl32.dll always uses Zink: no GALLIUM_DRIVER variable needed.
+# Drop opengl32.dll + libgallium_wgl.dll next to the game's .exe to use it,
+# delete them to return to the system OpenGL driver.
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+    inputs:
+      mesa_ref:
+        description: Mesa tag or branch (empty = main)
+        required: false
+        default: mesa-26.1.1
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Clone Mesa source
+        shell: pwsh
+        run: |
+          $ref = '${{ inputs.mesa_ref }}'
+          if ([string]::IsNullOrWhiteSpace($ref)) { $ref = 'mesa-26.1.1' }
+          git clone --depth 1 --branch $ref https://gitlab.freedesktop.org/mesa/mesa.git mesa-src
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::warning::Mesa ref '$ref' not found, building main"
+            git clone --depth 1 https://gitlab.freedesktop.org/mesa/mesa.git mesa-src
+          }
+          git -C mesa-src log -1 --format='Mesa %H %cd'
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install build tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install meson ninja mako PyYAML packaging
+
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+
+      - name: Install winflexbison
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/lexxmark/winflexbison/releases/download/v2.5.25/win_flex_bison-2.5.25.zip" -OutFile "winflexbison.zip"
+          Expand-Archive -Path "winflexbison.zip" -DestinationPath "C:\winflexbison"
+          echo "C:\winflexbison" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Clean PATH (remove Strawberry Perl toolchain)
+        shell: pwsh
+        run: |
+          $newPath = ($env:PATH -split ';' | Where-Object { $_ -notmatch 'Strawberry' }) -join ';'
+          echo "PATH=$newPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          echo "CC=cl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          echo "CXX=cl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Configure Mesa (Zink only)
+        shell: pwsh
+        run: |
+          cd mesa-src
+          # Zink loads vulkan-1.dll at run time: no Vulkan SDK is needed to build.
+          # b_vscrt=mt: static CRT, so the DLLs need no Visual C++ redistributable.
+          meson setup builddir `
+            --prefix="${{ github.workspace }}/install" `
+            -Dbuildtype=release `
+            -Db_vscrt=mt `
+            -Dplatforms=windows `
+            "-Dgallium-drivers=zink" `
+            "-Dvulkan-drivers=" `
+            -Dopengl=true `
+            -Degl=disabled `
+            -Dgles1=disabled `
+            -Dgles2=disabled `
+            -Dllvm=disabled `
+            -Dzstd=disabled `
+            -Dvalgrind=disabled `
+            -Dlibunwind=disabled `
+            -Dbuild-tests=false `
+            -Dwerror=false `
+            "-Dc_args=/wd4189" "-Dcpp_args=/wd4189"
+
+      - name: Build Mesa
+        run: meson compile -C mesa-src/builddir
+
+      - name: Install Mesa
+        run: meson install -C mesa-src/builddir
+
+      - name: Package opengl32.dll (Zink)
+        shell: pwsh
+        run: |
+          $out = "mesa-zink-windows-x64"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          # opengl32.dll is the WGL front; libgallium_wgl.dll holds Zink itself.
+          Get-ChildItem -Recurse -File install -Include *.dll | ForEach-Object { Copy-Item $_.FullName $out }
+          Copy-Item mesa-src/docs/license.rst "$out/LICENSE-Mesa.txt" -ErrorAction SilentlyContinue
+          git -C mesa-src log -1 --format='Mesa %H %cd' | Out-File "$out/VERSION.txt" -Encoding utf8
+          @"
+          Mesa Zink (OpenGL over Vulkan) for Windows x64.
+          Install: copy all .dll files next to the game .exe (e.g. tes3mp.exe).
+          Remove: delete those .dll files from the game folder.
+          Needs a Vulkan 1.2+ GPU driver.
+          "@ | Out-File "$out/README.txt" -Encoding utf8
+          Get-ChildItem $out | Format-Table Name, Length
+          Compress-Archive -Path "$out/*" -DestinationPath "$out.zip" -Force
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mesa-zink-windows-x64
+          path: mesa-zink-windows-x64.zip
+          retention-days: 90
